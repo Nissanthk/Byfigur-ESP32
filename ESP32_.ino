@@ -1,0 +1,275 @@
+//Libraries
+#include <SPI.h>//https://www.arduino.cc/en/reference/SPI
+#include <MFRC522.h>//https://github.com/miguelbalboa/rfid
+
+//Constants
+#define SS_PIN 5 //SS pin som er koblet til ESP32
+#define RST_PIN 2 //Reset pin som er koblet til ESP32
+
+#include <Arduino.h>
+#if defined(ESP32)
+#include <WiFi.h>
+#elif defined(ESP8266)
+#include <ESP8266WiFi.h>
+#endif
+#include <Firebase_ESP_Client.h>
+
+#include "addons/TokenHelper.h" // Provide the token generation process info.
+#include "addons/RTDBHelper.h" // Provide the RTDB payload printing info and other helper functions.
+
+// Insert your network credentials
+#define WIFI_SSID "WIFI_SSID" //WIFI Navn
+#define WIFI_PASSWORD "WIFI_PASSWORD" //WIFI passord 
+
+// Insert Firebase project API Key
+#define API_KEY "API_KEY" //Nøkkelen til Firebase databasen 
+
+// Insert RTDB URLefine the RTDB URL */
+#define DATABASE_URL "DATABASE_URL" //Nettadressen til firebase databasen  
+
+//Define Firebase Data object
+FirebaseData fbdo; 
+FirebaseAuth auth;
+FirebaseConfig config;
+
+//Parameters
+const int ipaddress[4] = {103, 97, 67, 25}; //IP-adressen til ESP32
+
+int status; //WIFI tilkoblings status 
+
+unsigned long sendDataPrevMillis = 0; 
+int count = 0;
+bool signupOK = false;
+
+//Variables
+byte nuidPICC[4] = {0, 0, 0, 0}; //IDen til skannet RFID
+MFRC522::MIFARE_Key key;
+MFRC522 rfid = MFRC522(SS_PIN, RST_PIN);
+
+void setup() {
+  //Init Serial USB
+  Serial.begin(115200); 
+  Serial.println(F("Initialize System")); //Starter opp systemet
+  SPI.begin(); //Starter kommunikasjon mellom ESP32 og RFID
+  rfid.PCD_Init(); //starter RFID
+
+  Serial.print(F("Reader :")); //skriver til skjerm 
+  rfid.PCD_DumpVersionToSerial(); //Reseter RFID
+
+  WiFi.begin(WIFI_SSID, WIFI_PASSWORD); //Kobler til Wifi nettverk med navn og passord 
+ 
+  config.api_key = API_KEY; //Config tar inn API key
+
+  config.database_url = DATABASE_URL; //Config tar inn database URL
+
+  if (Firebase.signUp(&config, &auth, "", "")) { //Logger inn til database
+    Serial.println("ok"); //skriver til skjerm
+    signupOK = true; //Variabel endres til true
+  }
+  else {
+    Serial.printf("%s\n", config.signer.signupError.message.c_str()); //Skriver error til skjerm 
+  }
+
+  config.token_status_callback = tokenStatusCallback; //Config tar inn tokenStatusCallback
+
+  Firebase.begin(&config, &auth); //Kobler seg til databasen 
+  Firebase.reconnectWiFi(true);  //kobler firebase til WIFI
+}
+
+void loop() {
+  readRFID(); //Kjører readRFID i loop 
+}
+
+void addPointsToPlayer(String Name, int count) //Funksjonen tar inn name og count
+{
+  if (Firebase.ready() && signupOK) { //Logger inn til databasen
+´    if (Firebase.RTDB.setInt(&fbdo, Name, count)) { //Setter int variabel til gitt name i databsen 
+      Serial.println("PASSED"); //Skriver til skjerm
+      Serial.println("PATH: " + fbdo.dataPath()); //Skriver path til skjerm
+      Serial.println("TYPE: " + fbdo.dataType()); //skriver datatype til skjerm
+    }
+    else {
+      Serial.println("FAILED"); //skriver til skjerm
+      Serial.println("REASON: " + fbdo.errorReason()); //skriver error til skjerm
+    }
+  }
+}
+
+void addNewID(String str) //tar inn string variabel 
+{
+  int str_len = str.length() + 1;  //lengde av string 
+  char char_array[str_len]; //lager char array
+  str.toCharArray(char_array, str_len); //konverterer string til char array
+      
+  if (Firebase.ready() && signupOK) { //logger inn til database
+    // Write an Int number on the database path test/int
+    if (Firebase.RTDB.setString(&fbdo, F(char_array), F("Available"))) { //Pusher char array til databasen 
+      Serial.println("PASSED"); //skriver til skjerm
+      Serial.println("PATH: " + fbdo.dataPath()); //skriver path til skjerm
+      Serial.println("TYPE: " + fbdo.dataType()); //skriver datatype til skjerm
+    }
+    else {
+      Serial.println("FAILED"); //skriver til skjerm 
+      Serial.println("REASON: " + fbdo.errorReason()); //skriver error til skjerm 
+    }
+  }
+}
+
+void runFirebaseProgram(){ //Alt av logikk for å sende data til og fra firebase 
+    
+  if (Firebase.ready() && (millis() - sendDataPrevMillis > 15000 || sendDataPrevMillis == 0)) //Logger inn til firebase 
+  {
+    const char *IDnumber = Firebase.RTDB.getString(&fbdo, F("Players ID")) ? fbdo.to<const char *>() : fbdo.errorReason().c_str(); //Henter string fra firebase
+    String mystring(IDnumber); //Konverterer Char peker til string
+    String newstring; 
+    int words = 1; 
+    for (int i = 0; i < mystring.length(); i++) //Overfører string mellom variabel
+    {
+      newstring += mystring[i]; //newstring blir mystring
+    }
+
+    for (int i = 0; i < newstring.length(); i++) //loop
+    {
+      if (newstring[i] == '{' or newstring[i] == '}' or newstring[i] == '"') //Fjerner symboler fra newstring
+      {
+        newstring[i] = ' ';
+      }
+
+      if (newstring[i] == ',')
+      {
+        words += 1; //Teller 
+      }
+    }
+    
+    newstring.replace(" ", ""); //fjerner mellomrom
+    
+    String carryID; 
+    String results[words]; 
+    int index = 0; 
+    for(int i = 0; i <= newstring.length(); i++) //loop
+    {
+      if (newstring[i] == ',')
+      {
+        results[index] = carryID; //String array tar inn carryID
+        index += 1; //teller
+        carryID = ""; //reseter carryID
+      }
+      else if (i == newstring.length())
+      {
+        results[index] = carryID; //String array tar inn carryID
+        carryID =""; //reseter carryID
+        index = 0; //teller
+      }
+      else 
+      {
+        carryID += newstring[i]; //carryID tar inn elementer fra newstring
+      }
+    }
+
+    String ID_ofplayer[words]; 
+    String Names_ofplayer[words]; 
+
+    for (int i = 0; i < words; i++) //loop separerer navn og ID i egne string variabler 
+    {
+      for (int j = 0; j <= results[i].length(); j++) //loop 
+      { 
+        if (results[i][j] == ':')
+        {
+          ID_ofplayer[i] = carryID; //Setter ID_ofplayer med carryID
+          carryID = ""; //reseter carryID
+        }
+        else if (j == results[i].length())
+        {
+          Names_ofplayer[i] = carryID; //setter Name_ofplayer med carryID
+          carryID = ""; //reseter carryID
+        }
+        else 
+        {
+          carryID += results[i][j]; //Setter carryID med elementer fra results
+        }
+      }
+    }
+    
+    String nuidPICCtoString; 
+    for (int i = 0; i < 4; i++)
+    {
+      nuidPICCtoString += nuidPICC[i]; //Konverterer byte til string 
+    }
+
+    
+    int noMatchFoundInt = 0; 
+    for (int i = 0; i < words; i++) //loop
+    {
+      if (nuidPICCtoString == ID_ofplayer[i])
+      {
+        Serial.println("Match found for: ");  //Skriver til skjerm 
+        addPointsToPlayer("Players/" + Names_ofplayer[i], getPlayersPoint("Players/" + Names_ofplayer[i]) + 1); //Pusher int til database 
+      }
+      else 
+      {
+        noMatchFoundInt += 1; //variabel
+      }
+    }
+    
+    if (noMatchFoundInt == words)
+    {
+      Serial.println("No match found..."); //skriver til skjerm 
+      addNewID("New ID/" + nuidPICCtoString); //Pusher string til database 
+    }
+  }
+}
+
+void readRFID(void ) { /* function readRFID */
+  ////Read RFID card
+
+  for (byte i = 0; i < 6; i++) {
+    key.keyByte[i] = 0xFF;
+  }
+  // Look for new 1 cards
+  if ( ! rfid.PICC_IsNewCardPresent())
+    return;
+
+  // Verify if the NUID has been readed
+  if (  !rfid.PICC_ReadCardSerial())
+    return;
+
+  // Store NUID into nuidPICC array
+  for (byte i = 0; i < 4; i++) {
+    nuidPICC[i] = rfid.uid.uidByte[i];
+  }
+
+  Serial.print(F("RFID In dec: ")); //skriver RFID til skjerm 
+  printDec(rfid.uid.uidByte, rfid.uid.size); //Skriver RFIDs ID til skjerm
+  Serial.println(); 
+  
+  runFirebaseProgram();  //kjører funksjon
+  
+  // Halt PICC
+  rfid.PICC_HaltA();
+
+  // Stop encryption on PCD
+  rfid.PCD_StopCrypto1();
+ 
+
+}
+
+void printDec(byte *buffer, byte bufferSize) { //tar inn byte og byte størrelse
+  for (byte i = 0; i < bufferSize; i++) {
+    Serial.print(buffer[i] < 0x10 ? " 0" : " "); 
+    Serial.print(buffer[i], DEC); //skriver hver buffer element til skjerm 
+  }
+}
+
+int getPlayersPoint(String str) //henter spillers poeng
+{
+  if (Firebase.ready() && (millis() - sendDataPrevMillis > 15000 || sendDataPrevMillis == 0)) //logger inn til database 
+  {
+      int str_len = str.length() + 1; //string lengde
+      char char_array[str_len]; //char array 
+      str.toCharArray(char_array, str_len); //konverterer string til char array 
+ 
+      const char *highscorePlayers = Firebase.RTDB.getString(&fbdo, F(char_array)) ? fbdo.to<const char *>() : fbdo.errorReason().c_str(); //henter string fra firebase 
+      String mystring(highscorePlayers); //konverterer char peker til string
+      return mystring.toInt(); //konverterer mystring til int og returnerer 
+   }
+}
